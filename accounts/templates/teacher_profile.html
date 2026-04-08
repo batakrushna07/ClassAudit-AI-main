@@ -1,0 +1,333 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ teacher.name }} - Profile</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+    <link rel="stylesheet" href="{% static 'css/teacher_theme.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+    <!-- Sidebar -->
+    {% include 'sidebar_teacher.html' %}
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Left Section -->
+        <div class="left-section">
+            <!-- Search Bar -->
+
+
+            <!-- Welcome Banner -->
+
+
+            <!-- Classes Section (Replacing Profile Card) -->
+            <div class="section-header-row"
+                style="margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="font-size: 1.25rem; font-weight: 700; color: #334155;">Classes</h2>
+
+            </div>
+
+            <div class="classes-grid">
+                {% if today_classes %}
+                {% for cls in today_classes %}
+                <!-- Cycle gradients -->
+                <div class="class-card {% cycle 'card-gradient-blue' 'card-gradient-purple' 'card-gradient-pink' %}">
+                    <h4>{{ cls.subject }}</h4>
+
+                    <!-- Mock Avatars (simulating students) -->
+                    <div class="class-avatars">
+                        <img src="https://ui-avatars.com/api/?background=random&color=fff&name=S1&size=64" alt="">
+                        <img src="https://ui-avatars.com/api/?background=random&color=fff&name=S2&size=64" alt="">
+                        <img src="https://ui-avatars.com/api/?background=random&color=fff&name=S3&size=64" alt="">
+                        <div class="more-count">+{{ forloop.counter|add:15 }}</div>
+                    </div>
+
+                    <div class="card-meta">
+                        <div class="meta-item">
+                            <i class="far fa-clock" style="width: 16px;"></i> {{ cls.start_time|time:"h:i A" }} -
+                            {{cls.end_time|time:"h:i A" }}
+                        </div>
+                        <a href="{% url 'start_class' cls.id %}"
+                            style="margin-top: 8px; background: rgba(255,255,255,0.25); text-align: center; padding: 8px 0; border-radius: 12px; color: white; text-decoration: none; font-weight: 600; display: block; transition: background 0.2s; backdrop-filter: blur(4px);">
+                            Start Class <i class="fas fa-play" style="font-size: 0.7rem; margin-left: 6px;"></i>
+                        </a>
+                    </div>
+                </div>
+                {% endfor %}
+                {% else %}
+                <div
+                    style="grid-column: 1 / -1; background: white; padding: 3rem; border-radius: 20px; text-align: center; box-shadow: var(--shadow-sm); color: var(--text-light);">
+                    <i class="fas fa-mug-hot" style="font-size: 2rem; margin-bottom: 1rem; opacity: 0.3;"></i>
+                    <p>No classes scheduled for today.</p>
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-user-check"></i></div>
+                    <div class="stat-info">
+                        <h3>{{ total_present }}</h3>
+                        <p>Total Present</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-clock"></i></div>
+                    <div class="stat-info">
+                        <h3>{{ late_attendance }}</h3>
+                        <p>Late Arrival</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-history"></i></div>
+                    <div class="stat-info">
+                        <h3>{{ undertime }}</h3>
+                        <p>Undertime</p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon"><i class="fas fa-user-times"></i></div>
+                    <div class="stat-info">
+                        <h3>{{ total_absent }}</h3>
+                        <p>Total Absent</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Row -->
+            <div style="display: grid; grid-template-columns: 1fr 1.5fr; gap: 1.5rem;">
+                <div class="chart-card">
+                    <h3>Attendance Rate</h3>
+                    <span class="badge badge-blue">This Month</span>
+                    <div style="height: 200px; position: relative; margin-top: 1.5rem;">
+                        <canvas id="attendanceRateChart"></canvas>
+                        <div
+                            style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 1.8rem; font-weight: 700; color: #3d4e6c;">
+                            {{ attendance_rate }}%
+                        </div>
+                    </div>
+                </div>
+
+                <div class="chart-card">
+                    <h3>Summary - {{ teacher.name }}</h3>
+                    <div style="height: 250px; margin-top: 1rem;">
+                        <canvas id="summaryChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Lessons Section -->
+            <div class="lessons-section">
+                <div class="section-header">
+                    <h3>Class Session Reports</h3>
+                    <div style="display: flex; align-items: center; gap: 1rem;">
+                        <form method="get" action="" style="display: flex; align-items: center; gap: 0.5rem;">
+                            <input type="date" name="date" value="{{ date_filter }}" onchange="this.form.submit()"
+                                style="padding: 6px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem; color: var(--text-dark); outline: none;">
+                            {% if date_filter %}
+                            <a href="." style="color: #ef5350; font-size: 0.85rem; text-decoration: none;"><i
+                                    class="fas fa-times"></i> Clear</a>
+                            {% endif %}
+                        </form>
+
+                    </div>
+                </div>
+
+                {% if class_history %}
+                <table class="lessons-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Subject</th>
+                            <th>Session Time</th>
+                            <th>Active Duration</th>
+                            <th>Logins</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for session in class_history %}
+                        <tr>
+                            <td style="font-weight: 600;">{{ session.start_time|date:"M d, Y" }}</td>
+                            <td><span class="badge badge-blue">{{session.timetable.subject|default:"ExtraClass"}}</span>
+                            </td>
+                            <td style="color: var(--text-light);">{{ session.start_time|time:"h:i A" }}
+                                -{{session.end_time|time:"h:i A" }}</td>
+                            <td style="font-weight: 700; color: #4caf50;">{{ session.total_active_duration }}</td>
+                            <td style="color: var(--text-light);">{{ session.monitoring_resumption_count }}</td>
+                            <td><span class="status-badge status-done">Completed</span></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <div class="empty-state">
+                    <i class="fas fa-history"></i>
+                    <p>No class sessions recorded yet</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Right Section -->
+        <div class="right-section">
+            <!-- User Profile Card -->
+            <div class="user-profile-card">
+                <div class="user-avatar">
+                    <img src="https://ui-avatars.com/api/?name={{ teacher.name }}&background=bbd7fc&color=fff&size=120&font-size=0.45"
+                        alt="{{ teacher.name }}">
+                </div>
+                <h3>{{ teacher.name }}</h3>
+                <p class="role-tag">Teacher</p>
+            </div>
+
+            <!-- Calendar -->
+            <div class="calendar-card">
+                <div class="calendar-header">
+                    <h3 id="calTitle"></h3>
+                    <div class="calendar-nav">
+                        <button onclick="nav(-1)"><i class="fas fa-chevron-left"></i></button>
+                        <button onclick="nav(1)"><i class="fas fa-chevron-right"></i></button>
+                    </div>
+                </div>
+                <div class="calendar-grid" id="calGrid"></div>
+            </div>
+            <script>
+                (function () {
+                    const M = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+                    const D = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+                    const t = new Date(), grid = document.getElementById('calGrid'), title = document.getElementById('calTitle');
+                    let cm = t.getMonth(), cy = t.getFullYear();
+                    function render() {
+                        title.textContent = M[cm] + ' ' + cy;
+                        grid.innerHTML = '';
+                        D.forEach(d => { let e = document.createElement('div'); e.className = 'calendar-day-label'; e.textContent = d; grid.appendChild(e); });
+                        const first = new Date(cy, cm, 1).getDay(), off = first === 0 ? 6 : first - 1, days = new Date(cy, cm + 1, 0).getDate(), prev = new Date(cy, cm, 0).getDate();
+                        for (let i = off - 1; i >= 0; i--) { let e = document.createElement('div'); e.className = 'calendar-day inactive'; e.textContent = prev - i; grid.appendChild(e); }
+                        for (let d = 1; d <= days; d++) { let e = document.createElement('div'); e.className = 'calendar-day'; e.textContent = d; if (d === t.getDate() && cm === t.getMonth() && cy === t.getFullYear()) e.classList.add('today'); grid.appendChild(e); }
+                        const rem = (7 - (off + days) % 7) % 7;
+                        for (let i = 1; i <= rem; i++) { let e = document.createElement('div'); e.className = 'calendar-day inactive'; e.textContent = i; grid.appendChild(e); }
+                    }
+                    window.nav = function (d) { cm += d; if (cm > 11) { cm = 0; cy++; } if (cm < 0) { cm = 11; cy--; } render(); };
+                    render();
+                })();
+            </script>
+
+            <!-- Reminders -->
+            <div class="reminders-card">
+                <h3>Reminders</h3>
+                <div class="reminder-item">
+                    <div class="reminder-icon"><i class="fas fa-bell"></i></div>
+                    <div class="reminder-content">
+                        <h4>Class - Assessment Review</h4>
+                        <p>{% now "d M Y, l" %}</p>
+                    </div>
+                </div>
+                <div class="reminder-item">
+                    <div class="reminder-icon"><i class="fas fa-bell"></i></div>
+                    <div class="reminder-content">
+                        <h4>Staff Meeting</h4>
+                        <p>{% now "d M Y, l" %}</p>
+                    </div>
+                </div>
+                <div class="reminder-item">
+                    <div class="reminder-icon"><i class="fas fa-bell"></i></div>
+                    <div class="reminder-content">
+                        <h4>Attendance Report Due</h4>
+                        <p>{% now "d M Y, l" %}</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Help Widget -->
+
+        </div>
+    </div>
+
+    <script>
+        // Attendance Rate Doughnut Chart
+        const ctxRate = document.getElementById('attendanceRateChart').getContext('2d');
+        const attendanceRate = {{ attendance_rate }};
+
+        new Chart(ctxRate, {
+            type: 'doughnut',
+            data: {
+                labels: ['Present', 'Absent'],
+                datasets: [{
+                    data: [attendanceRate, 100 - attendanceRate],
+                    backgroundColor: ['#3b82f6', '#f1f5f9'],
+                    borderWidth: 0,
+                    hoverOffset: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: '75%',
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { enabled: false }
+                }
+            }
+        });
+
+        // Summary Bar Chart
+        const ctxSummary = document.getElementById('summaryChart').getContext('2d');
+        new Chart(ctxSummary, {
+            type: 'bar',
+            data: {
+                labels: ['Present', 'Late', 'Undertime', 'Absent'],
+                datasets: [{
+                    label: 'Days',
+                    data: [{{ total_present }}, {{ late_attendance }}, {{ undertime }}, {{ total_absent }}],
+            backgroundColor: ['#1e40af', '#3b82f6', '#60a5fa', '#bbd7fc'],
+            borderRadius: 12,
+            borderSkipped: false,
+            barPercentage: 0.7,
+            categoryPercentage: 0.8
+                }]
+            },
+            options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        color: '#f1f5f9',
+                        borderDash: [5, 5]
+                    },
+                    ticks: {
+                        stepSize: 1,
+                        color: '#9ca6b8',
+                        font: { size: 11 }
+                    },
+                    border: { display: false }
+                },
+                x: {
+                    grid: { display: false },
+                    ticks: {
+                        color: '#9ca6b8',
+                        font: { size: 11 }
+                    },
+                    border: { display: false }
+                }
+            }
+        }
+        });
+    </script>
+</body>
+
+</html>

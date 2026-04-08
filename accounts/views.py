@@ -1,0 +1,1687 @@
+import logging
+import face_recognition
+import base64
+from django.shortcuts import render, redirect
+from django.http import JsonResponse, HttpResponse
+from django.core.files.base import ContentFile
+from .models import UserImages, User, Principal, Teacher, Timetable, TeacherAttendance, ClassSession
+from django.utils import timezone
+import datetime
+import calendar
+import os 
+import numpy as np 
+import cv2 
+from .utils.face_embedding import get_embedding 
+from .utils.face_matcher import match_face
+from django.conf import settings 
+from django.contrib.auth import authenticate, login, logout as auth_logout 
+from django.contrib.auth.decorators import login_required 
+from functools import wraps
+
+from django.contrib import messages
+from django.db.models import Count, Sum, Avg, Q
+from django.db.models.functions import TruncDate
+
+logger = logging.getLogger(__name__)
+
+
+def principal_required(view_func):
+    """Decorator that ensures the user is logged in AND is a Principal."""
+    @wraps(view_func)
+    @login_required
+    def wrapper(request, *args, **kwargs):
+        if not hasattr(request.user, 'principal'):
+            messages.error(request, 'Access denied. Principal account required.')
+            return redirect('home')
+        return view_func(request, *args, **kwargs)
+    return wrapper
+
+
+def home(request):
+    schools_count = Principal.objects.count()
+    faculty_count = Teacher.objects.count()
+    sessions_count = ClassSession.objects.count()
+    
+    return render(request, 'home.html', {
+        'schools_count': schools_count,
+        'faculty_count': faculty_count,
+        'sessions_count': sessions_count
+    })
+
+@login_required
+def logout_view(request):
+    auth_logout(request)
+    return redirect('home')
+
+def principal_register(request):
+    if request.method == 'POST':
+        username = request.POST.get('username', '').strip()
+        password = request.POST.get('password', '')
+        school_name = request.POST.get('school_name', '').strip()
+
+        # ── Input Validation ──
+        if not username or not password or not school_name:
+            return JsonResponse({'status': 'error', 'message': 'All fields are required.'})
+
+        if len(username) < 3:
+            return JsonResponse({'status': 'error', 'message': 'Username must be at least 3 characters long.'})
+
+        if not username.isalnum():
+            return JsonResponse({'status': 'error', 'message': 'Username can only contain letters and numbers.'})
+
+        if len(password) < 8:
+            return JsonResponse({'status': 'error', 'message': 'Password must be at least 8 characters long.'})
+
+        if password.isdigit() or password.isalpha():
+            return JsonResponse({'status': 'error', 'message': 'Password must contain both letters and numbers.'})
+
+        if len(school_name) < 2:
+            return JsonResponse({'status': 'error', 'message': 'Please enter a valid school name.'})
+
+        if User.objects.filter(username=username).exists():
+            return JsonResponse({'status': 'error', 'message': 'Username already exists.'})
+
+        user = User.objects.create_user(username=username, password=password)
+        Principal.objects.create(user=user, school_name=school_name)
+        
+        login(request, user)  # Log them in automatically
+        return JsonResponse({'status': 'success', 'message': 'Principal registered successfully!', 'redirect': '/principal/dashboard/'})
+
+    return render(request, 'principal_register.html')
+
+def principal_login_view(request):
+    if request.method == 'POST':
+        username = request.POST.get('username')
+        password = request.POST.get('password')
+        user = authenticate(username=username, password=password)
+        if user is not None:
+            if hasattr(user, 'principal'):
+                login(request, user)
+                return redirect('principal_dashboard')
+            else:
+                 return render(request, 'principal_login.html', {'error': 'Not a valid Principal account'})
+        else:
+             return render(request, 'principal_login.html', {'error': 'Invalid credentials'})
+    return render(request, 'principal_login.html')
+
+@principal_required
+def principal_dashboard(request):
+    from collections import defaultdict
+    
+    principal = request.user.principal
+    teachers = principal.teachers.all().order_by('department', 'name')
+    
+    # Group teachers by department
+    teachers_by_dept = defaultdict(list)
+    for teacher in teachers:
+        dept_name = teacher.get_department_display()
+        teachers_by_dept[dept_name].append(teacher)
+    
+    # Convert to regular dict and sort by department name
+    teachers_by_dept = dict(sorted(teachers_by_dept.items()))
+
+    # Calculate teachers present today
+    from django.utils import timezone
+    from .models import TeacherAttendance
+    today = timezone.now().date()
+    
+    present_today_count = TeacherAttendance.objects.filter(
+        teacher__principal=principal,
+        date=today
+    ).values('teacher').distinct().count()
+    
+    total_teachers = teachers.count()
+    absent_count = total_teachers - present_today_count
+    logger.debug("Dashboard stats: Total=%d, Present=%d, Absent=%d", total_teachers, present_today_count, absent_count)
+    
+    return render(request, 'principal_dashboard.html', {
+        'teachers': teachers,
+        'teachers_by_dept': teachers_by_dept,
+        'present_today_count': present_today_count,
+        'absent_count': absent_count
+    })
+
+def teacher_login_password(request):
+    if request.method == 'POST':
+        username = request.POST.get('username')
+        password = request.POST.get('password')
+        user = authenticate(username=username, password=password)
+        
+        if user is not None:
+            if hasattr(user, 'teacher'):
+                login(request, user)
+                return redirect('teacher_dashboard')
+            else:
+                return render(request, 'teacher_login.html', {'error': 'This account is not a Teacher account.'})
+        else:
+             return render(request, 'teacher_login.html', {'error': 'Invalid username or password'})
+    
+    return render(request, 'teacher_login.html')
+
+@principal_required
+def add_teacher(request):
+    # Check if user is a principal
+    try:
+        principal = request.user.principal
+    except (Principal.DoesNotExist, AttributeError):
+        return JsonResponse({'status': 'error', 'message': 'You must be logged in as a principal to add teachers.'})
+    
+    if request.method == 'POST':
+        try:
+            name = request.POST.get('name', '').strip()
+            username = request.POST.get('username', '').strip()
+            password = request.POST.get('password', '')
+            department = request.POST.get('department', 'OTHER')
+            face_image_data = request.POST.get('face_image', '')
+            
+            # Validate required fields
+            if not name:
+                return JsonResponse({'status': 'error', 'message': 'Teacher name is required.'})
+            if not username:
+                return JsonResponse({'status': 'error', 'message': 'Username is required.'})
+            if not password:
+                return JsonResponse({'status': 'error', 'message': 'Password is required.'})
+            if not face_image_data:
+                return JsonResponse({'status': 'error', 'message': 'Face image is required. Please capture a photo.'})
+
+            # Check if username already exists
+            if User.objects.filter(username=username).exists():
+                return JsonResponse({'status': 'error', 'message': f'Username "{username}" is already taken. Please choose a different username.'})
+
+            # --- Process face image FIRST (before creating DB records) ---
+            if not face_image_data or "," not in face_image_data:
+                return JsonResponse({'status': 'error', 'message': 'Invalid face image format. Please capture a valid photo.'})
+            face_data_str = face_image_data.split(",")[1]
+            image_data = base64.b64decode(face_data_str)
+
+            # Convert base64 to OpenCV image and extract embedding
+            nparr = np.frombuffer(image_data, np.uint8)
+            if nparr.size == 0:
+                return JsonResponse({'status': 'error', 'message': 'Empty face image data received.'})
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if frame is None:
+                return JsonResponse({'status': 'error', 'message': 'Failed to decode image.'})
+            emb = get_embedding(frame)
+
+            # If embedding fails, abort BEFORE creating any database records
+            if emb is None:
+                return JsonResponse({
+                    'status': 'error',
+                    'message': 'Could not detect a face in the captured image. Please retake the photo with better lighting and ensure only one face is visible.'
+                })
+
+            # --- Face verified, now create all records ---
+            from django.db import transaction
+
+            with transaction.atomic():
+                # Create User
+                user = User.objects.create_user(username=username, password=password)
+
+                # Create Teacher linked to Principal
+                Teacher.objects.create(user=user, principal=principal, name=name, department=department)
+
+                # Save Face Image to UserImages (for UI display)
+                face_image = ContentFile(image_data, name=f'{username}_face.jpg')
+                UserImages.objects.create(user=user, face_image=face_image)
+
+                # Save embedding to disk
+                project_root = settings.BASE_DIR
+                save_dir = os.path.join(project_root, "data", "users", username)
+                os.makedirs(save_dir, exist_ok=True)
+                np.save(os.path.join(save_dir, "embeddings.npy"), emb)
+
+            return JsonResponse({'status': 'success', 'message': f'Teacher {name} registered successfully!'})
+        except KeyError as e:
+            return JsonResponse({'status': 'error', 'message': f'Missing required field: {str(e)}'})
+        except Exception as e:
+            return JsonResponse({'status': 'error', 'message': f'Error: {str(e)}'})
+
+    return render(request, 'add_teacher.html')
+
+@principal_required
+def delete_teacher(request, teacher_id):
+    if request.method == 'POST':
+        try:
+            # Get the teacher and verify it belongs to this principal
+            teacher = Teacher.objects.get(id=teacher_id, principal=request.user.principal)
+            
+            # Delete the teacher — the post_delete signal (delete_teacher_user_and_data)
+            # automatically handles deleting the associated User and face data from disk.
+            teacher.delete()
+            
+            return JsonResponse({'status': 'success', 'message': 'Teacher deleted successfully!'})
+        except Teacher.DoesNotExist:
+            return JsonResponse({'status': 'error', 'message': 'Teacher not found or unauthorized.'})
+        except Exception as e:
+            logger.error("Error deleting teacher %s: %s", teacher_id, e, exc_info=True)
+            return JsonResponse({'status': 'error', 'message': str(e)})
+    
+    return JsonResponse({'status': 'error', 'message': 'Invalid request method.'})
+
+def login_user(request):
+    if request.method == 'POST':
+        username = request.POST['username']
+        face_image_data = request.POST['face_image']
+
+        try:
+            user = User.objects.get(username=username)
+        except User.DoesNotExist:
+            return JsonResponse({'status': 'error', 'message': 'User not found.'})
+
+        if not hasattr(user, 'teacher'):
+             return JsonResponse({'status': 'error', 'message': 'This is not a teacher account.'})
+
+        try:
+            # 1. Load Stored Embedding (Fast Path)
+            project_root = settings.BASE_DIR
+            user_dir = os.path.join(project_root, "data", "users", username)
+            embedding_path = os.path.join(user_dir, "embeddings.npy")
+            
+            stored_face_encoding = None
+            if os.path.exists(embedding_path):
+                try:
+                    stored_face_encoding = np.load(embedding_path)
+                except Exception as e:
+                    logger.error("Error loading embedding for %s: %s", username, e)
+
+            # 2. Fallback: Generate from UserImages if file missing (Slow Path)
+            if stored_face_encoding is None:
+                user_image = UserImages.objects.filter(user=user).first()
+                if user_image:
+                    try:
+                        os.makedirs(user_dir, exist_ok=True)
+                        stored_face_image = face_recognition.load_image_file(user_image.face_image.path)
+                        stored_face_encodings = face_recognition.face_encodings(stored_face_image)
+                        
+                        if len(stored_face_encodings) > 0:
+                            stored_face_encoding = stored_face_encodings[0]
+                            np.save(embedding_path, stored_face_encoding)
+                            logger.info("Generated and saved new embedding for %s during login", username)
+                        else:
+                            return JsonResponse({'status': 'error', 'message': 'No face found in your registered profile image.'})
+                    except Exception as e:
+                        logger.error("Fallback encoding failed: %s", e)
+                        return JsonResponse({'status': 'error', 'message': 'Account validation failed. Please contact admin.'})
+                else:
+                    return JsonResponse({'status': 'error', 'message': 'No registered face found for this account.'})
+
+            # 3. Process Uploaded Image
+            if not face_image_data or "," not in face_image_data:
+                return JsonResponse({'status': 'error', 'message': 'Invalid face image format.'})
+            face_data_str = face_image_data.split(",")[1]
+            image_data = base64.b64decode(face_data_str)
+            if not image_data:
+                return JsonResponse({'status': 'error', 'message': 'Empty face image data received.'})
+            uploaded_image = ContentFile(image_data, name=f'{username}_temp.jpg')
+            uploaded_face_image = face_recognition.load_image_file(uploaded_image)
+            uploaded_face_encodings = face_recognition.face_encodings(uploaded_face_image)
+
+            if len(uploaded_face_encodings) > 0:
+                uploaded_face_encoding = uploaded_face_encodings[0]
+                
+                # Match
+                match = face_recognition.compare_faces([stored_face_encoding], uploaded_face_encoding, tolerance=0.45)
+                if match[0]:
+                    login(request, user)
+                    return JsonResponse({'status': 'success', 'message': 'Login successful!', 'redirect': '/teacher/dashboard/'})
+                else:
+                    return JsonResponse({'status': 'error', 'message': 'Face verification failed. Please ensure you are in good lighting.'})
+            else:
+                 return JsonResponse({'status': 'error', 'message': 'No face detected. Please try again with your face clearly visible.'})
+        except Exception as e:
+            logger.error("Login process error: %s", e, exc_info=True)
+            return JsonResponse({'status': 'error', 'message': f'Internal error: {str(e)}'})
+   
+    return render(request, 'login.html')
+
+@login_required
+def teacher_dashboard(request):
+    try:
+        teacher = request.user.teacher
+        timetable = teacher.timetables.all().order_by('start_time')
+        
+        # Group by day for the dashboard view
+        from collections import defaultdict
+        
+        # Order of days for display
+        day_order = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']
+        day_mapping = dict(Timetable.DAYS_OF_WEEK)
+        
+        # Bucket slots by day code
+        temp_schedule = defaultdict(list)
+        for slot in timetable:
+            temp_schedule[slot.day].append(slot)
+            
+        # Create ordered dictionary with full day names
+        grouped_schedule = {}
+        for code in day_order:
+            if code in temp_schedule:
+                full_name = day_mapping.get(code, code)
+                grouped_schedule[full_name] = temp_schedule[code]
+        
+        # Check for any ongoing sessions
+        active_session = ClassSession.objects.filter(teacher=teacher, status='Ongoing').first()
+        
+        return render(request, 'teacher_dashboard.html', {
+            'teacher': teacher, 
+            'timetable': timetable,
+            'grouped_schedule': grouped_schedule,
+            'active_session': active_session
+        })
+    except Exception as e:
+        logger.error("Teacher dashboard error: %s", e)
+        return redirect('home')
+
+@principal_required
+def schedule_teacher(request, teacher_id):
+    try:
+        # Ensure the teacher belongs to the logged-in principal
+        teacher = Teacher.objects.get(id=teacher_id, principal=request.user.principal)
+        
+        if request.method == 'POST':
+            subject = request.POST.get('subject')
+            day = request.POST.get('day')
+            start_time = request.POST.get('start_time')
+            end_time = request.POST.get('end_time')
+            
+            Timetable.objects.create(
+                teacher=teacher,
+                subject=subject,
+                day=day,
+                start_time=start_time,
+                end_time=end_time
+            )
+            return redirect('schedule_teacher', teacher_id=teacher_id)
+            
+        timetable = Timetable.objects.filter(teacher=teacher).order_by('day', 'start_time')
+        return render(request, 'schedule_teacher.html', {'teacher': teacher, 'timetable': timetable})
+    except Teacher.DoesNotExist:
+        return redirect('principal_dashboard')
+
+@principal_required
+def delete_schedule(request, timetable_id):
+    if request.method == 'POST':
+        try:
+            # Ensure the slot belongs to a teacher managed by the logged-in principal
+            slot = Timetable.objects.get(id=timetable_id)
+            if slot.teacher.principal == request.user.principal:
+                teacher_id = slot.teacher.id
+                slot.delete()
+                messages.success(request, "Class removed from schedule.")
+                return redirect('schedule_teacher', teacher_id=teacher_id)
+        except Timetable.DoesNotExist:
+            pass
+    return redirect('principal_dashboard')
+
+@principal_required
+def delete_all_schedule(request, teacher_id):
+    if request.method == 'POST':
+        try:
+            teacher = Teacher.objects.get(id=teacher_id, principal=request.user.principal)
+            Timetable.objects.filter(teacher=teacher).delete()
+            messages.success(request, f"All scheduled classes for {teacher.name} have been cleared.")
+            return redirect('schedule_teacher', teacher_id=teacher_id)
+        except Teacher.DoesNotExist:
+            pass
+    return redirect('principal_dashboard')
+
+@login_required
+def teacher_profile(request):
+    try:
+        teacher = request.user.teacher
+        face_image = UserImages.objects.filter(user=request.user).first()
+        
+        # Calculate Stats for Current Month
+        now = timezone.now()
+        current_year = now.year
+        current_month = now.month
+        
+        # 1. Total Present (This Month)
+        attendance_records = TeacherAttendance.objects.filter(
+            teacher=teacher, 
+            date__year=current_year, 
+            date__month=current_month
+        )
+        total_present = attendance_records.count()
+        
+        # 2. Late Attendance
+        late_count = 0
+        day_map = {0: 'MON', 1: 'TUE', 2: 'WED', 3: 'THU', 4: 'FRI', 5: 'SAT', 6: 'SUN'}
+        
+        for record in attendance_records:
+            day_str = day_map[record.date.weekday()]
+            # Find earliest class for this day
+            first_class = teacher.timetables.filter(day=day_str).order_by('start_time').first()
+            
+            attendance_time = record.time
+            # Standard cutoff 9:00 AM if no class, else class start time
+            cutoff_time = datetime.time(9, 0, 0)
+            if first_class:
+                cutoff_time = first_class.start_time
+            
+            # Since TeacherAttendance.time is auto_now_add, it might be UTC 
+            # based on Django settings. We'll use the Date to create a localized check.
+            # However, my previous check showed it stores Local time on some setups.
+            # To be safe, we'll treat it as Local time as per confirmed shell output.
+            if attendance_time > cutoff_time:
+                # Add a 10 min grace for daily punch-in too
+                punch_in_mins = attendance_time.hour * 60 + attendance_time.minute
+                cutoff_mins = cutoff_time.hour * 60 + cutoff_time.minute
+                if punch_in_mins > (cutoff_mins + 10):
+                    late_count += 1
+
+        # 3. Total Absent (Working days passed - Present days)
+        # Assume Mon-Sat are working days
+        valid_workdays = 0
+        today_date = now.date()
+        cal = calendar.monthcalendar(current_year, current_month)
+        
+        for week in cal:
+            for day in week:
+                if day == 0: continue
+                current_date = datetime.date(current_year, current_month, day)
+                if current_date > today_date:
+                    continue
+                if current_date.weekday() < 6: # 0-5 is Mon-Sat
+                    valid_workdays += 1
+        
+        total_absent = valid_workdays - total_present
+        if total_absent < 0: total_absent = 0
+
+        # 4. Attendance Rate
+        attendance_rate = 0 
+        if valid_workdays > 0:
+            attendance_rate = int((total_present / valid_workdays) * 100)
+
+        # 5. Class History (Completed Sessions)
+        class_history = ClassSession.objects.filter(teacher=teacher, status='Completed').order_by('-start_time')
+        
+        date_filter = request.GET.get('date')
+        if date_filter:
+            class_history = class_history.filter(start_time__date=date_filter)
+
+        # 6. Today's Classes
+        today_str = day_map[now.weekday()]
+        today_classes = teacher.timetables.filter(day=today_str).order_by('start_time')
+
+        context = {
+            'teacher': teacher, 
+            'face_image': face_image,
+            'total_present': total_present,
+            'late_attendance': late_count,
+            'total_absent': total_absent,
+            'undertime': 0, # Placeholder
+            'attendance_rate': attendance_rate,
+            'class_history': class_history,
+            'today_classes': today_classes,
+            'date_filter': date_filter
+        }
+
+        return render(request, 'teacher_profile.html', context)
+    except Exception as e:
+        logger.error("Teacher profile error: %s", e)
+        return redirect('home')
+
+@login_required
+def previous_records_teacher(request):
+    try:
+        teacher = request.user.teacher
+        # All completed sessions
+        all_sessions = ClassSession.objects.filter(teacher=teacher, status='Completed').order_by('-start_time')
+        
+        context = {
+            'teacher': teacher,
+            'sessions': all_sessions
+        }
+        return render(request, 'previous_records_teacher.html', context)
+    except (Teacher.DoesNotExist, AttributeError):
+        return redirect('home')
+@login_required
+def mark_attendance(request):
+    if request.method == 'POST':
+        try:
+            face_image_data = request.POST['face_image']
+            user = request.user
+            
+            if not hasattr(user, 'teacher'):
+                 return JsonResponse({'status': 'error', 'message': 'Only teachers can mark attendance.'})
+
+            teacher = user.teacher
+            
+            # Check if attendance already marked for today
+            from django.utils import timezone
+            today = timezone.now().date()
+            if TeacherAttendance.objects.filter(teacher=teacher, date=today).exists():
+                 return JsonResponse({'status': 'error', 'message': 'Attendance already marked for today.'})
+
+            # Verify Face
+            if not face_image_data or "," not in face_image_data:
+                return JsonResponse({'status': 'error', 'message': 'Invalid face image format.'})
+            face_data_str = face_image_data.split(",")[1]
+            image_data = base64.b64decode(face_data_str)
+            
+            nparr = np.frombuffer(image_data, np.uint8)
+            if nparr.size == 0:
+                return JsonResponse({'status': 'error', 'message': 'Empty face image data received.'})
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if frame is None:
+                return JsonResponse({'status': 'error', 'message': 'Failed to decode face image.'})
+            
+            live_emb = get_embedding(frame)
+            
+            if live_emb is None:
+                 return JsonResponse({'status': 'error', 'message': 'No face detected in the image.'})
+            
+            # Load stored embedding
+            project_root = settings.BASE_DIR
+            embedding_path = os.path.join(project_root, "data", "users", user.username, "embeddings.npy")
+            
+            if not os.path.exists(embedding_path):
+                 return JsonResponse({'status': 'error', 'message': 'Face registration data not found. Please contact admin to re-register.'})
+            
+            try:
+                stored_emb = np.load(embedding_path)
+            except Exception as e:
+                return JsonResponse({'status': 'error', 'message': 'Error loading face data.'})
+            
+            # Match
+            is_match = match_face(stored_emb, live_emb)
+            
+            if is_match:
+                 # Log Attendance
+                 TeacherAttendance.objects.create(teacher=teacher)
+                 return JsonResponse({'status': 'success', 'message': 'Attendance marked successfully!'})
+            else:
+                 return JsonResponse({'status': 'error', 'message': 'Face verification failed. Please try again.'})
+
+        except Exception as e:
+            return JsonResponse({'status': 'error', 'message': str(e)})
+
+    # Ensure user is a teacher for GET too if the template depends on it
+    if hasattr(request.user, 'teacher'):
+        return render(request, 'mark_attendance.html', {'teacher': request.user.teacher})
+    return redirect('login')
+@login_required
+def start_class(request, timetable_id):
+    try:
+        teacher = request.user.teacher
+        timetable = Timetable.objects.get(id=timetable_id, teacher=teacher)
+        
+        # Security Check: Enforce scheduled time and day
+        now = timezone.localtime(timezone.now())
+        current_time = now.time()
+        current_day_name = now.strftime('%A')
+        day_map = {
+            'Monday': 'MON', 'Tuesday': 'TUE', 'Wednesday': 'WED', 
+            'Thursday': 'THU', 'Friday': 'FRI', 'Saturday': 'SAT'
+        }
+        current_day_code = day_map.get(current_day_name)
+
+        if timetable.day != current_day_code:
+            messages.error(request, f"Access Denied: This class is scheduled for {timetable.get_day_display()}, but today is {current_day_name}.")
+            return redirect('teacher_dashboard')
+            
+        if not (timetable.start_time <= current_time <= timetable.end_time):
+            messages.error(request, f"Access Denied: You can only start this class during its scheduled time ({timetable.start_time.strftime('%I:%M %p')} - {timetable.end_time.strftime('%I:%M %p')}).")
+            return redirect('teacher_dashboard')
+        
+        # Check if a session already exists for this specific timetable slot today
+        existing_session = ClassSession.objects.filter(
+            teacher=teacher,
+            timetable=timetable,
+            start_time__date=now.date()
+        ).first()
+
+        if existing_session:
+            # If already ongoing, just redirect
+            if existing_session.status == 'Ongoing':
+                return redirect('live_class_monitoring')
+            else:
+                # Resume the completed session
+                existing_session.status = 'Ongoing'
+                existing_session.save()
+                return redirect('live_class_monitoring')
+
+        # Create new session if none exists for today
+        ClassSession.objects.create(
+            teacher=teacher,
+            timetable=timetable,
+            status='Ongoing',
+            total_active_duration=datetime.timedelta(0),
+            monitoring_resumption_count=0  # Will be incremented on monitoring page load
+        )
+        return redirect('live_class_monitoring')
+    except Exception as e:
+        messages.error(request, f"Error starting class: {e}")
+        return redirect('teacher_dashboard')
+
+@login_required
+def end_class(request):
+    try:
+        teacher = request.user.teacher
+        session = ClassSession.objects.filter(teacher=teacher, status='Ongoing').first()
+        if session:
+            session.end_time = timezone.now()
+            session.status = 'Completed'
+            session.save()
+        
+        return redirect('teacher_dashboard')
+    except Exception as e:
+        logger.error("End class error: %s", e)
+        return redirect('teacher_dashboard')
+
+@login_required
+def live_class_monitoring(request):
+    try:
+        teacher = request.user.teacher
+        session = ClassSession.objects.filter(teacher=teacher, status='Ongoing').first()
+        if not session:
+            return redirect('teacher_dashboard')
+        
+        # Increment resumption count (counts as a 'login' or session start)
+        session.monitoring_resumption_count += 1
+        session.save()
+            
+        return render(request, 'live_class_monitoring.html', {'session': session})
+    except (Teacher.DoesNotExist, AttributeError):
+        return redirect('home')
+
+@login_required
+def update_live_attendance(request):
+    if request.method == 'POST':
+        try:
+            face_image_data = request.POST.get('face_image')
+            if not face_image_data:
+                return JsonResponse({'status': 'error', 'message': 'No image data'})
+
+            teacher = request.user.teacher
+            session = ClassSession.objects.filter(teacher=teacher, status='Ongoing').first()
+            
+            if not session:
+                 return JsonResponse({'status': 'error', 'message': 'No ongoing session.'})
+
+            # Verify Face
+            if not face_image_data or "," not in face_image_data:
+                return JsonResponse({'status': 'warning', 'message': 'Invalid face image format.'})
+            face_data_str = face_image_data.split(",")[1]
+            image_data = base64.b64decode(face_data_str)
+            
+            nparr = np.frombuffer(image_data, np.uint8)
+            if nparr.size == 0:
+                return JsonResponse({'status': 'warning', 'message': 'Empty face image data received.'})
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if frame is None:
+                return JsonResponse({'status': 'warning', 'message': 'Failed to decode face image.'})
+            
+            live_emb = get_embedding(frame)
+            
+            if live_emb is None:
+                 return JsonResponse({'status': 'warning', 'message': 'No face detected.'})
+
+            # Load stored embedding
+            project_root = settings.BASE_DIR
+            user_dir = os.path.join(project_root, "data", "users", request.user.username)
+            embedding_path = os.path.join(user_dir, "embeddings.npy")
+            
+            stored_emb = None
+            
+            if os.path.exists(embedding_path):
+                stored_emb = np.load(embedding_path)
+            else:
+                # Fallback: Try to create embedding from existing UserImages
+                logger.info("Embedding not found for %s, attempting to generate from stored image.", request.user.username)
+                
+                # Ensure directory exists first!
+                os.makedirs(user_dir, exist_ok=True)
+                
+                user_image = UserImages.objects.filter(user=request.user).first()
+                if user_image and user_image.face_image:
+                    try:
+                        # Load image using face_recognition (as in old logic) or cv2
+                        # Let's use face_recognition since we have the file path
+                        image_path = user_image.face_image.path
+                        # Check module import inside fallback
+                        import face_recognition
+                        
+                        image = face_recognition.load_image_file(image_path)
+                        encodings = face_recognition.face_encodings(image)
+                        
+                        if len(encodings) > 0:
+                            stored_emb = encodings[0]
+                            # Save it for future use!
+                            np.save(embedding_path, stored_emb)
+                            logger.info("Generated and saved new embedding for %s", request.user.username)
+                        else:
+                            logger.warning("No face found in stored UserImage")
+                    except Exception as e:
+                        logger.error("Error generating fallback embedding: %s", e)
+                
+            if stored_emb is None:
+                 return JsonResponse({'status': 'error', 'message': 'Registration data missing. Please re-register.'})
+            
+            if match_face(stored_emb, live_emb):
+                # Increment active duration
+                # Assuming this endpoint is called every 5 seconds
+                session.total_active_duration += datetime.timedelta(seconds=5)
+                session.save()
+                
+                # Format duration for display
+                total_seconds = int(session.total_active_duration.total_seconds())
+                minutes = total_seconds // 60
+                seconds = total_seconds % 60
+                duration_str = f"{minutes}m {seconds}s"
+                
+                return JsonResponse({
+                    'status': 'success', 
+                    'message': 'Authorized',
+                    'duration': duration_str
+                })
+            else:
+                return JsonResponse({'status': 'warning', 'message': 'Unknown face detected'})
+
+        except Exception as e:
+            logger.error("Live attendance update error: %s", e)
+            return JsonResponse({'status': 'error', 'message': str(e)})
+            
+    return JsonResponse({'status': 'error', 'message': 'Invalid method'})
+
+@principal_required
+def view_teacher_reports(request, teacher_id):
+    try:
+        from django.utils import timezone
+        import datetime
+        
+        # Verify access: Principal can only view their own teachers
+        teacher = Teacher.objects.get(id=teacher_id, principal=request.user.principal)
+        
+        # Get Filter Parameters
+        selected_month = request.GET.get('month')
+        selected_year = request.GET.get('year')
+        selected_date = request.GET.get('date')
+        
+        now = timezone.now()
+        class_history = ClassSession.objects.filter(teacher=teacher, status='Completed')
+        
+        if selected_date:
+            date_dt = datetime.datetime.strptime(selected_date, '%Y-%m-%d').date()
+            class_history = class_history.filter(start_time__date=date_dt)
+        elif selected_month and selected_year:
+            class_history = class_history.filter(
+                start_time__year=selected_year,
+                start_time__month=selected_month
+            )
+        
+        class_history = list(class_history.order_by('-start_time'))
+
+        # Calculate metrics for each session
+        for session in class_history:
+            if session.timetable:
+                # Calculate expected duration in minutes
+                s_start = session.timetable.start_time
+                s_end = session.timetable.end_time
+                start_mins = s_start.hour * 60 + s_start.minute
+                end_mins = s_end.hour * 60 + s_end.minute
+                session.expected_duration_minutes = end_mins - start_mins
+                
+                # Check for low attendance (< 60% of expected)
+                total_active_mins = session.total_active_duration.total_seconds() / 60 if session.total_active_duration else 0
+                if session.expected_duration_minutes > 0:
+                    percentage = (total_active_mins / session.expected_duration_minutes) * 100
+                    session.is_low_attendance = percentage < 60
+                else:
+                    session.is_low_attendance = False
+            else:
+                session.expected_duration_minutes = 0 # Or handle extra classes differently
+                session.is_low_attendance = False
+        
+        # Years and Months for filters
+        years = range(now.year - 2, now.year + 1)
+        months = [
+            (1, 'January'), (2, 'February'), (3, 'March'), (4, 'April'),
+            (5, 'May'), (6, 'June'), (7, 'July'), (8, 'August'),
+            (9, 'September'), (10, 'October'), (11, 'November'), (12, 'December')
+        ]
+        
+        context = {
+            'teacher': teacher,
+            'class_history': class_history,
+            'selected_month': int(selected_month) if selected_month else None,
+            'selected_year': int(selected_year) if selected_year else None,
+            'selected_date': selected_date,
+            'years': years,
+            'months': months,
+        }
+        
+        return render(request, 'teacher_reports.html', context)
+    except Exception as e:
+        logger.error("Error viewing reports: %s", e, exc_info=True)
+        return redirect('principal_dashboard')
+
+@principal_required
+def principal_analysis(request):
+    try:
+        from django.utils import timezone
+        import datetime
+        from django.db.models import F, Sum, Count, Q
+        
+        principal = request.user.principal
+        
+        # Get Filter Parameters
+        selected_dept = request.GET.get('department')
+        selected_month = request.GET.get('month') # Format: 1-12
+        selected_year = request.GET.get('year')   # Format: 2024
+        selected_day = request.GET.get('day')     # Format: YYYY-MM-DD
+
+        now = timezone.now()
+        
+        # Determine Date Range
+        if selected_day:
+            day_dt = datetime.datetime.strptime(selected_day, '%Y-%m-%d')
+            start_date = timezone.make_aware(day_dt.replace(hour=0, minute=0, second=0))
+            end_date = start_date + datetime.timedelta(days=1)
+            is_single_day = True
+        elif selected_month and selected_year:
+            start_date = timezone.make_aware(datetime.datetime(int(selected_year), int(selected_month), 1))
+            if int(selected_month) == 12:
+                next_month = timezone.make_aware(datetime.datetime(int(selected_year) + 1, 1, 1))
+            else:
+                next_month = timezone.make_aware(datetime.datetime(int(selected_year), int(selected_month) + 1, 1))
+            end_date = next_month
+            is_single_day = False
+        else:
+            # Default to current month
+            start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            end_date = now + datetime.timedelta(days=1)
+            is_single_day = False
+            selected_month = str(now.month)
+            selected_year = str(now.year)
+
+        teachers = Teacher.objects.filter(principal=principal)
+        if selected_dept and selected_dept != 'ALL':
+            teachers = teachers.filter(department=selected_dept)
+
+        # 1. Teacher Attendance Consistency (Bar Chart)
+        consistency_labels = []
+        consistency_data = []
+        
+        # 2. Department-wise Performance Index
+        # We'll collect per-teacher data keyed by department, then aggregate after the loop
+        from collections import defaultdict
+        dept_perf_raw = defaultdict(lambda: {'consistencies': [], 'completions': [], 'interruptions': []})
+
+        # 6. Class Completion Rate (Bar Chart)
+        completion_labels = []
+        completion_data = []
+
+        day_map_idx = {'MON': 0, 'TUE': 1, 'WED': 2, 'THU': 3, 'FRI': 4, 'SAT': 5, 'SUN': 6}
+        dept_map = dict(Teacher.DEPARTMENT_CHOICES)
+
+        for teacher in teachers:
+            sessions = ClassSession.objects.filter(
+                teacher=teacher, 
+                start_time__gte=start_date,
+                start_time__lt=end_date
+            )
+            completed_sessions = sessions.filter(status='Completed')
+            
+            total_scheduled_minutes = 0
+            total_active_minutes = 0
+            
+            for session in completed_sessions:
+                if session.timetable:
+                    # Approximation for minutes
+                    start = datetime.datetime.combine(datetime.date.today(), session.timetable.start_time)
+                    end = datetime.datetime.combine(datetime.date.today(), session.timetable.end_time)
+                    total_scheduled_minutes += (end - start).total_seconds() / 60
+                    if session.total_active_duration:
+                        total_active_minutes += session.total_active_duration.total_seconds() / 60
+            
+            if total_scheduled_minutes > 0:
+                consistency_data.append(round(min(100, (total_active_minutes / total_scheduled_minutes) * 100), 1))
+            else:
+                consistency_data.append(0)
+            consistency_labels.append(teacher.name)
+            
+            # Store per-teacher consistency for department aggregation
+            teacher_consistency = consistency_data[-1]  # last appended value
+
+            # --- 5. Interruption count for Risk Density ---
+            teacher_interruptions = 0
+            for session in sessions:
+                if session.monitoring_resumption_count and session.monitoring_resumption_count > 1:
+                    teacher_interruptions += (session.monitoring_resumption_count - 1)
+
+            # --- 6. Completion Rate ---
+            # Calculate scheduled classes in this period
+            scheduled_count = 0
+            timetables = teacher.timetables.all()
+            temp_date = start_date.date()
+            loop_end = end_date.date() if not is_single_day else end_date.date()
+            
+            while temp_date < loop_end:
+                for tt in timetables:
+                    if temp_date.weekday() == day_map_idx.get(tt.day):
+                        scheduled_count += 1
+                temp_date += datetime.timedelta(days=1)
+            
+            actual_completed = completed_sessions.count()
+            if scheduled_count > 0:
+                rate = (actual_completed / scheduled_count) * 100
+                completion_data.append(round(min(100, rate), 1))
+            else:
+                # If single day and no classes scheduled, completion might be 0 but avoid dividing by 0
+                completion_data.append(0)
+            completion_labels.append(teacher.name)
+
+            # Collect for department aggregation
+            teacher_completion = completion_data[-1]  # last appended value
+            dept_perf_raw[teacher.department]['consistencies'].append(teacher_consistency)
+            dept_perf_raw[teacher.department]['completions'].append(teacher_completion)
+            dept_perf_raw[teacher.department]['interruptions'].append(teacher_interruptions)
+
+        # --- Department-wise Performance Index ---
+        dept_perf_labels = []
+        dept_perf_avg_consistency = []
+        dept_perf_avg_completion = []
+        dept_perf_index = []
+        for dept_code, vals in dept_perf_raw.items():
+            dept_name = dept_map.get(dept_code, dept_code)
+            avg_cons = round(sum(vals['consistencies']) / len(vals['consistencies']), 1) if vals['consistencies'] else 0
+            avg_comp = round(sum(vals['completions']) / len(vals['completions']), 1) if vals['completions'] else 0
+            perf_idx = round(0.6 * avg_cons + 0.4 * avg_comp, 1)
+            dept_perf_labels.append(dept_name)
+            dept_perf_avg_consistency.append(avg_cons)
+            dept_perf_avg_completion.append(avg_comp)
+            dept_perf_index.append(perf_idx)
+
+        # --- 5. Department Risk Density Heatmap ---
+        risk_density_labels = []  # department names
+        risk_low_consistency = []  # severity score 0-10
+        risk_low_completion = []   # severity score 0-10
+        risk_high_interruptions = []  # severity score 0-10
+        
+        for dept_code, vals in dept_perf_raw.items():
+            dept_name = dept_map.get(dept_code, dept_code)
+            risk_density_labels.append(dept_name)
+            
+            # Low Consistency risk: 100% = 0 risk, 0% = 10 risk
+            avg_cons = sum(vals['consistencies']) / len(vals['consistencies']) if vals['consistencies'] else 0
+            risk_low_consistency.append(round(max(0, (100 - avg_cons)) / 10, 1))
+            
+            # Low Completion risk: 100% = 0 risk, 0% = 10 risk
+            avg_comp = sum(vals['completions']) / len(vals['completions']) if vals['completions'] else 0
+            risk_low_completion.append(round(max(0, (100 - avg_comp)) / 10, 1))
+            
+            # High Interruptions risk: avg interruptions per teacher, capped at 10
+            avg_intr = sum(vals['interruptions']) / len(vals['interruptions']) if vals['interruptions'] else 0
+            risk_high_interruptions.append(round(min(10, avg_intr), 1))
+
+        # 3. Daily Attendance Trend (Line Chart)
+        # Always show last 14 days relative to the end of the selected period for context
+        trend_end = end_date.date()
+        trend_start = trend_end - datetime.timedelta(days=14)
+        attendance_trends = TeacherAttendance.objects.filter(
+            teacher__principal=principal,
+            date__gte=trend_start,
+            date__lt=trend_end
+        )
+        if selected_dept and selected_dept != 'ALL':
+            attendance_trends = attendance_trends.filter(teacher__department=selected_dept)
+            
+        attendance_trends = attendance_trends.values('date').annotate(count=Count('teacher', distinct=True)).order_by('date')
+        
+        daily_trend_labels = [item['date'].strftime('%b %d') for item in attendance_trends]
+        daily_trend_data = [item['count'] for item in attendance_trends]
+
+        # 4. Department-wise Presence (Doughnut)
+        # For the selected day OR specifically today if month selected
+        target_presence_date = start_date.date() if is_single_day else now.date()
+        present_on_date = TeacherAttendance.objects.filter(
+            teacher__principal=principal,
+            date=target_presence_date
+        )
+        if selected_dept and selected_dept != 'ALL':
+            present_on_date = present_on_date.filter(teacher__department=selected_dept)
+            
+        present_on_date = present_on_date.values('teacher__department').annotate(count=Count('id'))
+        
+        dept_presence_labels = [dept_map.get(item['teacher__department'], item['teacher__department']) for item in present_on_date]
+        dept_presence_data = [item['count'] for item in present_on_date]
+
+        # Years for dropdown
+        years = range(now.year - 2, now.year + 1)
+        months = [
+            (1, 'January'), (2, 'February'), (3, 'March'), (4, 'April'),
+            (5, 'May'), (6, 'June'), (7, 'July'), (8, 'August'),
+            (9, 'September'), (10, 'October'), (11, 'November'), (12, 'December')
+        ]
+
+        context = {
+            'consistency_labels': consistency_labels,
+            'consistency_data': consistency_data,
+            'dept_perf_labels': dept_perf_labels,
+            'dept_perf_avg_consistency': dept_perf_avg_consistency,
+            'dept_perf_avg_completion': dept_perf_avg_completion,
+            'dept_perf_index': dept_perf_index,
+            'daily_trend_labels': daily_trend_labels,
+            'daily_trend_data': daily_trend_data,
+            'dept_presence_labels': dept_presence_labels,
+            'dept_presence_data': dept_presence_data,
+            'risk_density_labels': risk_density_labels,
+            'risk_low_consistency': risk_low_consistency,
+            'risk_low_completion': risk_low_completion,
+            'risk_high_interruptions': risk_high_interruptions,
+            'completion_labels': completion_labels,
+            'completion_data': completion_data,
+            'departments': Teacher.DEPARTMENT_CHOICES,
+            'selected_dept': selected_dept,
+            'selected_month': int(selected_month) if selected_month else None,
+            'selected_year': int(selected_year) if selected_year else None,
+            'selected_day': selected_day,
+            'years': years,
+            'months': months,
+        }
+        return render(request, 'principal_analysis.html', context)
+    except Exception as e:
+        logger.error("Analysis error: %s", e, exc_info=True)
+        messages.error(request, f"Error loading analysis: {str(e)}")
+        return redirect('principal_dashboard')
+
+@principal_required
+def export_defaulter_csv(request):
+    import csv
+    from django.http import HttpResponse
+    from django.utils import timezone
+    import datetime
+    from .models import Teacher, ClassSession, TeacherAttendance
+    
+    principal = request.user.principal
+    selected_month = request.GET.get('month')
+    selected_year = request.GET.get('year')
+    selected_dept = request.GET.get('department')
+    
+    now = timezone.now()
+    month = int(selected_month) if selected_month else now.month
+    year = int(selected_year) if selected_year else now.year
+    
+    # Date Range
+    start_date = timezone.make_aware(datetime.datetime(year, month, 1))
+    if month == 12:
+        end_date = timezone.make_aware(datetime.datetime(year + 1, 1, 1))
+    else:
+        end_date = timezone.make_aware(datetime.datetime(year, month + 1, 1))
+    
+    # Previous month range (for sustained consistency & decline trend)
+    if month == 1:
+        prev_month, prev_year = 12, year - 1
+    else:
+        prev_month, prev_year = month - 1, year
+    prev_start = timezone.make_aware(datetime.datetime(prev_year, prev_month, 1))
+    if prev_month == 12:
+        prev_end = timezone.make_aware(datetime.datetime(prev_year + 1, 1, 1))
+    else:
+        prev_end = timezone.make_aware(datetime.datetime(prev_year, prev_month + 1, 1))
+    
+    # Response Configuration
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename="defaulter_report_{month}_{year}.csv"'
+    
+    writer = csv.writer(response)
+    writer.writerow([
+        'Teacher Name', 'Department', 'Consistency (%)', 'Prev Consistency (%)',
+        'Completion Rate (%)', 'Gap Ratio (%)', 'Missed Classes',
+        'Risk Score (max 14)', 'Status'
+    ])
+    
+    teachers = Teacher.objects.filter(principal=principal)
+    if selected_dept and selected_dept != 'ALL':
+        teachers = teachers.filter(department=selected_dept)
+        
+    day_map_idx = {'MON': 0, 'TUE': 1, 'WED': 2, 'THU': 3, 'FRI': 4, 'SAT': 5, 'SUN': 6}
+    dept_map = dict(Teacher.DEPARTMENT_CHOICES)
+    
+    for teacher in teachers:
+        sessions = ClassSession.objects.filter(
+            teacher=teacher, 
+            start_time__gte=start_date,
+            start_time__lt=end_date
+        )
+        completed_sessions = sessions.filter(status='Completed')
+        timetables = teacher.timetables.all()
+        
+        # ── Current month metrics ──
+        total_scheduled_minutes = 0
+        total_active_minutes = 0
+        
+        for session in sessions:
+            if session.timetable:
+                s_start = session.timetable.start_time
+                s_end = session.timetable.end_time
+                if session.status == 'Completed' and session.total_active_duration:
+                    total_active_minutes += session.total_active_duration.total_seconds() / 60
+                d_start = datetime.datetime.combine(datetime.date.today(), s_start)
+                d_end = datetime.datetime.combine(datetime.date.today(), s_end)
+                total_scheduled_minutes += (d_end - d_start).total_seconds() / 60
+
+        consistency = 0
+        if total_scheduled_minutes > 0:
+            consistency = min(100, round((total_active_minutes / total_scheduled_minutes) * 100, 1))
+        
+        # ── Previous month consistency ──
+        prev_sessions = ClassSession.objects.filter(
+            teacher=teacher, start_time__gte=prev_start, start_time__lt=prev_end
+        )
+        prev_completed = prev_sessions.filter(status='Completed')
+        prev_sched_mins = 0
+        prev_active_mins = 0
+        for s in prev_completed:
+            if s.timetable:
+                ps = datetime.datetime.combine(datetime.date.today(), s.timetable.start_time)
+                pe = datetime.datetime.combine(datetime.date.today(), s.timetable.end_time)
+                prev_sched_mins += (pe - ps).total_seconds() / 60
+                if s.total_active_duration:
+                    prev_active_mins += s.total_active_duration.total_seconds() / 60
+        prev_consistency = 0
+        if prev_sched_mins > 0:
+            prev_consistency = round((prev_active_mins / prev_sched_mins) * 100, 1)
+            
+        # ── Scheduled & missed classes ──
+        scheduled_classes_count = 0
+        temp_date = start_date.date()
+        loop_end = end_date.date()
+        # Build ordered list of (date, timetable) for absence tracking
+        scheduled_list = []
+        while temp_date < loop_end:
+            for tt in timetables:
+                if temp_date.weekday() == day_map_idx.get(tt.day):
+                    scheduled_classes_count += 1
+                    scheduled_list.append((temp_date, tt))
+            temp_date += datetime.timedelta(days=1)
+            
+        actual_completed = completed_sessions.count()
+        completion_rate = 0
+        if scheduled_classes_count > 0:
+            completion_rate = round((actual_completed / scheduled_classes_count) * 100, 1)
+        
+        # ── Attendance Gap Ratio ──
+        gap_ratio = 0
+        if total_scheduled_minutes > 0:
+            gap_ratio = max(0, round(((total_scheduled_minutes - total_active_minutes) / total_scheduled_minutes) * 100, 1))
+        
+        # ── Repeated Absence Pattern ──
+        missed_classes = 0
+        consecutive_missed = 0
+        max_consecutive = 0
+        for sched_date, tt in scheduled_list:
+            session_exists = sessions.filter(
+                timetable=tt,
+                start_time__date=sched_date
+            ).exists()
+            if not session_exists:
+                missed_classes += 1
+                consecutive_missed += 1
+                max_consecutive = max(max_consecutive, consecutive_missed)
+            else:
+                consecutive_missed = 0
+        
+        # ══════════════════════════════════════
+        # RISK SCORE (Max 14)
+        # Fair thresholds adjusted for low face-detection accuracy
+        # ══════════════════════════════════════
+        risk_score = 0
+        
+        # Factor 1: Sustained Low Consistency (max 4)
+        if consistency < 40:
+            risk_score += 4
+        elif consistency < 55 and prev_consistency < 55:
+            risk_score += 3
+        elif consistency < 65:
+            risk_score += 1
+        
+        # Factor 2: Low Completion Rate (max 3)
+        if completion_rate < 60:
+            risk_score += 3
+        elif completion_rate < 75:
+            risk_score += 2
+        elif completion_rate < 85:
+            risk_score += 1
+        
+        # Factor 3: Attendance Gap Ratio (max 3)
+        if gap_ratio > 60:
+            risk_score += 3
+        elif gap_ratio > 45:
+            risk_score += 2
+        elif gap_ratio > 30:
+            risk_score += 1
+        
+        # Factor 4: Repeated Absence Pattern (max 2)
+        if max_consecutive >= 3 or missed_classes >= 5:
+            risk_score += 2
+        elif max_consecutive >= 2 or missed_classes >= 3:
+            risk_score += 1
+        
+        # Factor 5: Performance Decline Trend (max 2)
+        if prev_consistency > 0 and consistency < (prev_consistency - 25):
+            risk_score += 2
+        elif prev_consistency > 0 and consistency < (prev_consistency - 15):
+            risk_score += 1
+        
+        # ── Classification (max score = 14) ──
+        if risk_score >= 10 or consistency < 40:
+            status = 'DEFAULTER'
+        elif risk_score >= 6:
+            status = 'Needs Attention'
+        else:
+            status = 'Good Standing'
+        
+        writer.writerow([
+            teacher.name,
+            dept_map.get(teacher.department, teacher.department),
+            f"{consistency}%",
+            f"{prev_consistency}%",
+            f"{completion_rate}%",
+            f"{gap_ratio}%",
+            missed_classes,
+            risk_score,
+            status
+        ])
+    
+    return response
+
+@login_required
+def teacher_help(request):
+    try:
+        teacher = request.user.teacher
+        return render(request, 'teacher_help.html', {'teacher': teacher})
+    except (Teacher.DoesNotExist, AttributeError):
+        return redirect('home')
+
+@principal_required
+def teacher_analysis(request, teacher_id):
+    """Comprehensive per-teacher analysis with Risk Gauge, Heatmap, and more."""
+    try:
+        import json
+        from django.utils import timezone as tz
+        from django.db.models import F, Sum, Count, Q
+
+        principal = request.user.principal
+        teacher = Teacher.objects.get(id=teacher_id, principal=principal)
+
+        now = tz.now()
+        # Filter params
+        selected_month = request.GET.get('month')
+        selected_year = request.GET.get('year')
+
+        if selected_month and selected_year:
+            month = int(selected_month)
+            year = int(selected_year)
+        else:
+            month = now.month
+            year = now.year
+            selected_month = str(month)
+            selected_year = str(year)
+
+        start_date = tz.make_aware(datetime.datetime(year, month, 1))
+        if month == 12:
+            end_date = tz.make_aware(datetime.datetime(year + 1, 1, 1))
+        else:
+            end_date = tz.make_aware(datetime.datetime(year, month + 1, 1))
+
+        day_map_idx = {'MON': 0, 'TUE': 1, 'WED': 2, 'THU': 3, 'FRI': 4, 'SAT': 5, 'SUN': 6}
+        dept_map = dict(Teacher.DEPARTMENT_CHOICES)
+
+        sessions = ClassSession.objects.filter(
+            teacher=teacher,
+            start_time__gte=start_date,
+            start_time__lt=end_date
+        )
+        completed_sessions = sessions.filter(status='Completed')
+
+        # ──────────────────────────────────────────────
+        # 1. RISK SCORE GAUGE (NEW 5-Factor System)
+        # ──────────────────────────────────────────────
+        total_scheduled_minutes = 0
+        total_active_minutes = 0
+
+        for session in sessions:
+            if session.timetable:
+                s_start = session.timetable.start_time
+                s_end = session.timetable.end_time
+
+                if session.status == 'Completed' and session.total_active_duration:
+                    total_active_minutes += session.total_active_duration.total_seconds() / 60
+
+                d_start = datetime.datetime.combine(datetime.date.today(), s_start)
+                d_end = datetime.datetime.combine(datetime.date.today(), s_end)
+                total_scheduled_minutes += (d_end - d_start).total_seconds() / 60
+
+        consistency = 0
+        if total_scheduled_minutes > 0:
+            consistency = min(100, round((total_active_minutes / total_scheduled_minutes) * 100, 1))
+
+        # ── Previous month consistency ──
+        if month == 1:
+            prev_m, prev_y = 12, year - 1
+        else:
+            prev_m, prev_y = month - 1, year
+        prev_start = tz.make_aware(datetime.datetime(prev_y, prev_m, 1))
+        if prev_m == 12:
+            prev_end = tz.make_aware(datetime.datetime(prev_y + 1, 1, 1))
+        else:
+            prev_end = tz.make_aware(datetime.datetime(prev_y, prev_m + 1, 1))
+
+        prev_sessions = ClassSession.objects.filter(
+            teacher=teacher, start_time__gte=prev_start, start_time__lt=prev_end
+        )
+        prev_completed_sessions = prev_sessions.filter(status='Completed')
+        prev_sched_mins = 0
+        prev_active_mins = 0
+        for s in prev_completed_sessions:
+            if s.timetable:
+                ps = datetime.datetime.combine(datetime.date.today(), s.timetable.start_time)
+                pe = datetime.datetime.combine(datetime.date.today(), s.timetable.end_time)
+                prev_sched_mins += (pe - ps).total_seconds() / 60
+                if s.total_active_duration:
+                    prev_active_mins += s.total_active_duration.total_seconds() / 60
+        prev_consistency = 0
+        if prev_sched_mins > 0:
+            prev_consistency = round((prev_active_mins / prev_sched_mins) * 100, 1)
+
+        # Scheduled classes count & absence tracking
+        scheduled_classes_count = 0
+        timetables = teacher.timetables.all()
+        temp_date = start_date.date()
+        loop_end = end_date.date()
+        scheduled_list = []
+        while temp_date < loop_end:
+            for tt in timetables:
+                if temp_date.weekday() == day_map_idx.get(tt.day):
+                    scheduled_classes_count += 1
+                    scheduled_list.append((temp_date, tt))
+            temp_date += datetime.timedelta(days=1)
+
+        actual_completed = completed_sessions.count()
+        completion_rate = 0
+        if scheduled_classes_count > 0:
+            completion_rate = round((actual_completed / scheduled_classes_count) * 100, 1)
+
+        # ── Attendance Gap Ratio ──
+        gap_ratio = 0
+        if total_scheduled_minutes > 0:
+            gap_ratio = max(0, round(((total_scheduled_minutes - total_active_minutes) / total_scheduled_minutes) * 100, 1))
+
+        # ── Repeated Absence Pattern ──
+        missed_classes = 0
+        consecutive_missed = 0
+        max_consecutive = 0
+        for sched_date, tt in scheduled_list:
+            session_exists = sessions.filter(
+                timetable=tt,
+                start_time__date=sched_date
+            ).exists()
+            if not session_exists:
+                missed_classes += 1
+                consecutive_missed += 1
+                max_consecutive = max(max_consecutive, consecutive_missed)
+            else:
+                consecutive_missed = 0
+
+        # ══════════════════════════════════════
+        # RISK SCORE (Max 14)
+        # Fair thresholds adjusted for low face-detection accuracy
+        # ══════════════════════════════════════
+        risk_score = 0
+
+        # Factor 1: Sustained Low Consistency (max 4)
+        if consistency < 40:
+            risk_score += 4
+        elif consistency < 55 and prev_consistency < 55:
+            risk_score += 3
+        elif consistency < 65:
+            risk_score += 1
+
+        # Factor 2: Low Completion Rate (max 3)
+        if completion_rate < 60:
+            risk_score += 3
+        elif completion_rate < 75:
+            risk_score += 2
+        elif completion_rate < 85:
+            risk_score += 1
+
+        # Factor 3: Attendance Gap Ratio (max 3)
+        if gap_ratio > 60:
+            risk_score += 3
+        elif gap_ratio > 45:
+            risk_score += 2
+        elif gap_ratio > 30:
+            risk_score += 1
+
+        # Factor 4: Repeated Absence Pattern (max 2)
+        if max_consecutive >= 3 or missed_classes >= 5:
+            risk_score += 2
+        elif max_consecutive >= 2 or missed_classes >= 3:
+            risk_score += 1
+
+        # Factor 5: Performance Decline Trend (max 2)
+        decline_detected = False
+        if prev_consistency > 0 and consistency < (prev_consistency - 25):
+            risk_score += 2
+            decline_detected = True
+        elif prev_consistency > 0 and consistency < (prev_consistency - 15):
+            risk_score += 1
+            decline_detected = True
+
+        max_risk = 14
+        # Performance score: inverse of risk (higher = better)
+        performance_score = max(0, round(100 - (risk_score / max_risk) * 100))
+
+        # Classification (max score = 14)
+        if risk_score >= 10 or consistency < 40:
+            risk_category = 'Defaulter'
+            risk_color = '#ef4444'
+        elif risk_score >= 6:
+            risk_category = 'Needs Attention'
+            risk_color = '#f59e0b'
+        else:
+            risk_category = 'Reliable'
+            risk_color = '#10b981'
+
+        # ──────────────────────────────────────────────
+        # 2. WEEKLY PERFORMANCE HEATMAP
+        # ──────────────────────────────────────────────
+        days_order = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']
+        days_display = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+
+        # Time slots: 8AM-6PM in 1-hour blocks
+        time_slots = []
+        for h in range(8, 18):
+            time_slots.append(f"{h:02d}:00")
+
+        # Build heatmap_data: rows=days, cols=time_slots, value=active minutes
+        heatmap_data = []
+        for day_code in days_order:
+            row = []
+            for slot_idx, slot in enumerate(time_slots):
+                slot_start_hour = 8 + slot_idx
+                slot_end_hour = slot_start_hour + 1
+
+                total_mins = 0
+                for session in completed_sessions:
+                    if session.timetable and session.timetable.day == day_code:
+                        if session.total_active_duration:
+                            # Check if session overlaps this time slot
+                            tt_start_h = session.timetable.start_time.hour
+                            tt_end_h = session.timetable.end_time.hour
+                            if session.timetable.end_time.minute > 0:
+                                tt_end_h += 1
+
+                            if tt_start_h < slot_end_hour and tt_end_h > slot_start_hour:
+                                # Distribute active time proportionally
+                                tt_total_slots = max(1, tt_end_h - tt_start_h)
+                                active_mins = session.total_active_duration.total_seconds() / 60
+                                total_mins += active_mins / tt_total_slots
+
+                row.append(round(total_mins, 1))
+            heatmap_data.append(row)
+
+        # ──────────────────────────────────────────────
+        # 3. ATTENDANCE CONSISTENCY RADAR
+        # ──────────────────────────────────────────────
+        # Dimensions: Consistency, Completion, Gap Efficiency, Regularity, Stability
+        consistency_score = min(100, consistency)
+        completion_score = min(100, completion_rate)
+        gap_efficiency_score = max(0, 100 - gap_ratio) if total_scheduled_minutes > 0 else 0
+        
+        # Regularity: attendance frequency
+        attendance_in_period = TeacherAttendance.objects.filter(
+            teacher=teacher,
+            date__gte=start_date.date(),
+            date__lt=end_date.date()
+        ).count()
+        working_days_in_period = 0
+        temp_date = start_date.date()
+        while temp_date < end_date.date():
+            if temp_date.weekday() < 6:
+                working_days_in_period += 1
+            temp_date += datetime.timedelta(days=1)
+        regularity_score = min(100, round((attendance_in_period / max(1, working_days_in_period)) * 100))
+        
+        # Stability: no decline = 100, decline detected = lower
+        stability_score = 50 if decline_detected else 100
+        if prev_consistency > 0:
+            diff = consistency - prev_consistency
+            stability_score = max(0, min(100, round(50 + diff)))
+
+        radar_labels = ['Consistency', 'Completion', 'Gap Efficiency', 'Regularity', 'Stability']
+        radar_data = [consistency_score, completion_score, gap_efficiency_score, regularity_score, stability_score]
+
+        # ──────────────────────────────────────────────
+        # 4. MONTHLY TREND (last 6 months)
+        # ──────────────────────────────────────────────
+        monthly_trend_labels = []
+        monthly_trend_data = []
+        for i in range(5, -1, -1):
+            m = month - i
+            y = year
+            while m <= 0:
+                m += 12
+                y -= 1
+            m_start = tz.make_aware(datetime.datetime(y, m, 1))
+            if m == 12:
+                m_end = tz.make_aware(datetime.datetime(y + 1, 1, 1))
+            else:
+                m_end = tz.make_aware(datetime.datetime(y, m + 1, 1))
+
+            m_sessions = ClassSession.objects.filter(
+                teacher=teacher,
+                status='Completed',
+                start_time__gte=m_start,
+                start_time__lt=m_end
+            )
+            m_total_active = 0
+            m_total_sched = 0
+            for s in m_sessions:
+                if s.timetable and s.total_active_duration:
+                    m_total_active += s.total_active_duration.total_seconds() / 60
+                    d_s = datetime.datetime.combine(datetime.date.today(), s.timetable.start_time)
+                    d_e = datetime.datetime.combine(datetime.date.today(), s.timetable.end_time)
+                    m_total_sched += (d_e - d_s).total_seconds() / 60
+
+            m_consistency = round((m_total_active / m_total_sched) * 100, 1) if m_total_sched > 0 else 0
+            month_name = datetime.date(y, m, 1).strftime('%b %Y')
+            monthly_trend_labels.append(month_name)
+            monthly_trend_data.append(min(100, m_consistency))
+
+        # ──────────────────────────────────────────────
+        # 5. CLASS-WISE PERFORMANCE (per subject)
+        # ──────────────────────────────────────────────
+        subject_stats = {}
+        for session in completed_sessions:
+            if session.timetable:
+                subj = session.timetable.subject
+                if subj not in subject_stats:
+                    subject_stats[subj] = {'active': 0, 'scheduled': 0, 'count': 0}
+                subject_stats[subj]['count'] += 1
+                if session.total_active_duration:
+                    subject_stats[subj]['active'] += session.total_active_duration.total_seconds() / 60
+                d_s = datetime.datetime.combine(datetime.date.today(), session.timetable.start_time)
+                d_e = datetime.datetime.combine(datetime.date.today(), session.timetable.end_time)
+                subject_stats[subj]['scheduled'] += (d_e - d_s).total_seconds() / 60
+
+        classwise_labels = list(subject_stats.keys())
+        classwise_active = [round(v['active'], 1) for v in subject_stats.values()]
+        classwise_scheduled = [round(v['scheduled'], 1) for v in subject_stats.values()]
+
+        # ──────────────────────────────────────────────
+        # 6. PUNCTUALITY DOUGHNUT (Based on daily punch-in)
+        # ──────────────────────────────────────────────
+        on_time_classes = actual_completed
+        missed_count = missed_classes
+
+        punctuality_labels = ['Classes Taken', 'Classes Missed']
+        punctuality_data = [on_time_classes, missed_count]
+
+        # ──────────────────────────────────────────────
+        # 7. SUMMARY STATS CARDS
+        # ──────────────────────────────────────────────
+        total_classes_taken = actual_completed
+        avg_duration_mins = round(total_active_minutes / max(1, actual_completed), 1) if actual_completed > 0 else 0
+
+        # Years / Months for filter
+        years = range(now.year - 2, now.year + 1)
+        months_list = [
+            (1, 'January'), (2, 'February'), (3, 'March'), (4, 'April'),
+            (5, 'May'), (6, 'June'), (7, 'July'), (8, 'August'),
+            (9, 'September'), (10, 'October'), (11, 'November'), (12, 'December')
+        ]
+
+        context = {
+            'teacher': teacher,
+            # Gauge
+            'performance_score': performance_score,
+            'risk_category': risk_category,
+            'risk_color': risk_color,
+            'risk_score': risk_score,
+            # Stats
+            'consistency': consistency,
+            'prev_consistency': prev_consistency,
+            'completion_rate': completion_rate,
+            'total_classes_taken': total_classes_taken,
+            'scheduled_classes_count': scheduled_classes_count,
+            'gap_ratio': gap_ratio,
+            'missed_classes': missed_classes,
+            'max_consecutive': max_consecutive,
+            'decline_detected': decline_detected,
+            'avg_duration_mins': avg_duration_mins,
+            'total_active_minutes': round(total_active_minutes, 1),
+            'attendance_in_period': attendance_in_period,
+            'working_days_in_period': working_days_in_period,
+            # Heatmap
+            'heatmap_data': json.dumps(heatmap_data),
+            'heatmap_days': json.dumps(days_display),
+            'heatmap_slots': json.dumps(time_slots),
+            # Radar
+            'radar_labels': json.dumps(radar_labels),
+            'radar_data': json.dumps(radar_data),
+            # Monthly Trend
+            'monthly_trend_labels': json.dumps(monthly_trend_labels),
+            'monthly_trend_data': json.dumps(monthly_trend_data),
+            # Class-wise
+            'classwise_labels': json.dumps(classwise_labels),
+            'classwise_active': json.dumps(classwise_active),
+            'classwise_scheduled': json.dumps(classwise_scheduled),
+            # Punctuality
+            'punctuality_labels': json.dumps(punctuality_labels),
+            'punctuality_data': json.dumps(punctuality_data),
+            # Filters
+            'selected_month': int(selected_month),
+            'selected_year': int(selected_year),
+            'years': years,
+            'months': months_list,
+        }
+        return render(request, 'teacher_analysis.html', context)
+
+    except Exception as e:
+        logger.error("Teacher analysis error: %s", e, exc_info=True)
+        messages.error(request, f"Error loading teacher analysis: {str(e)}")
+        return redirect('principal_dashboard')

@@ -1,0 +1,196 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClassAudit AI — Smart Attendance System</title>
+    <meta name="description"
+        content="AI-powered face recognition attendance system for modern educational institutions.">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/home.css' %}">
+    <link rel="stylesheet" href="{% static 'css/responsive.css' %}">
+</head>
+
+<body>
+    <!-- Background Blobs -->
+    <div class="bg-decor">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <div class="page">
+        <!-- Top Bar -->
+        <nav class="topbar">
+            <div class="brand">
+                <div class="brand-logo"><i class="fas fa-cube"></i></div>
+                <span>ClassAudit AI</span>
+            </div>
+            <div class="topbar-nav">
+                <a href="/principal/login/">Principal Login</a>
+                <a href="/login/">Faculty Login</a>
+                <a href="/principal/register/" class="btn-cta">Register School</a>
+            </div>
+        </nav>
+
+        <!-- Hero -->
+        <section class="hero">
+            <div class="hero-left">
+                <div class="hero-pill">
+                    <span class="pulse-dot"></span>
+                    AI-Powered Face Recognition
+                </div>
+
+                <h1>Smarter Way to<br><span class="highlight">Track Attendance</span></h1>
+
+                <p class="hero-desc">
+                    Automated face recognition technology for secure, real-time attendance tracking.
+                    Built for schools that demand precision and accountability.
+                </p>
+
+                <p class="role-label">Continue as</p>
+
+                <div class="role-cards">
+                    <a href="/principal/login/" class="role-card pink-card">
+                        <div class="rc-icon rose"><i class="fas fa-user-tie"></i></div>
+                        <div class="rc-text">
+                            <h3>Principal</h3>
+                            <p>Manage institution, faculty &amp; analytics</p>
+                        </div>
+                        <i class="fas fa-arrow-right rc-arrow"></i>
+                    </a>
+                    <a href="/login/" class="role-card">
+                        <div class="rc-icon indigo"><i class="fas fa-chalkboard-teacher"></i></div>
+                        <div class="rc-text">
+                            <h3>Faculty Staff</h3>
+                            <p>Mark attendance &amp; view schedule</p>
+                        </div>
+                        <i class="fas fa-arrow-right rc-arrow"></i>
+                    </a>
+                </div>
+
+                <div class="tags">
+                    <div class="tag"><i class="fas fa-camera"></i> Face Recognition</div>
+                    <div class="tag"><i class="fas fa-bolt"></i> Live Monitoring</div>
+                    <div class="tag"><i class="fas fa-shield-halved"></i> CSRF Protected</div>
+                </div>
+            </div>
+
+            <!-- Visual: Face Scanning Animation -->
+            <div class="hero-right">
+                <div class="scan-scene">
+                    <!-- Soft glow -->
+                    <div class="device-glow"></div>
+
+                    <!-- Phone device -->
+                    <div class="device-frame">
+                        <div class="device-notch"></div>
+                        <div class="face-display">
+                            <!-- Face outline with scan -->
+                            <div class="face-svg-wrap">
+                                <!-- Scan beam -->
+                                <div class="scan-beam"></div>
+
+                                <!-- Recognition dots on face -->
+                                <div class="face-dot fd-1"></div>
+                                <div class="face-dot fd-2"></div>
+                                <div class="face-dot fd-3"></div>
+                                <div class="face-dot fd-4"></div>
+                                <div class="face-dot fd-5"></div>
+                                <div class="face-dot fd-6"></div>
+                                <div class="face-dot fd-7"></div>
+                                <div class="face-dot fd-8"></div>
+
+                                <!-- Connecting lines -->
+                                <div class="face-line fl-1"></div>
+                                <div class="face-line fl-2"></div>
+                                <div class="face-line fl-3"></div>
+
+                                <!-- Face SVG -->
+                                <svg viewBox="0 0 180 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <!-- Head shape -->
+                                    <ellipse cx="90" cy="95" rx="65" ry="80" stroke="#cbd5e1" stroke-width="1.5"
+                                        fill="#f8fafc" />
+                                    <!-- Hair -->
+                                    <path d="M25 85 C25 40, 50 15, 90 15 C130 15, 155 40, 155 85" stroke="#94a3b8"
+                                        stroke-width="1.5" fill="#e2e8f0" />
+                                    <!-- Eyes -->
+                                    <ellipse cx="65" cy="90" rx="10" ry="6" fill="#94a3b8" />
+                                    <ellipse cx="115" cy="90" rx="10" ry="6" fill="#94a3b8" />
+                                    <circle cx="65" cy="89" r="3" fill="#475569" />
+                                    <circle cx="115" cy="89" r="3" fill="#475569" />
+                                    <!-- Eyebrows -->
+                                    <path d="M50 78 Q65 72 80 78" stroke="#64748b" stroke-width="1.5" fill="none" />
+                                    <path d="M100 78 Q115 72 130 78" stroke="#64748b" stroke-width="1.5" fill="none" />
+                                    <!-- Nose -->
+                                    <path d="M85 95 Q90 115 95 95" stroke="#cbd5e1" stroke-width="1" fill="none" />
+                                    <!-- Mouth -->
+                                    <path d="M70 130 Q90 142 110 130" stroke="#94a3b8" stroke-width="1.5" fill="none" />
+                                    <!-- Glasses -->
+                                    <rect x="48" y="80" width="35" height="22" rx="8" stroke="#64748b"
+                                        stroke-width="1.2" fill="none" />
+                                    <rect x="97" y="80" width="35" height="22" rx="8" stroke="#64748b"
+                                        stroke-width="1.2" fill="none" />
+                                    <line x1="83" y1="91" x2="97" y2="91" stroke="#64748b" stroke-width="1" />
+                                    <!-- Neck / shoulders hint -->
+                                    <path d="M65 170 Q90 185 115 170" stroke="#cbd5e1" stroke-width="1.5" fill="none" />
+                                    <path d="M50 210 Q65 180 90 178 Q115 180 130 210" stroke="#cbd5e1"
+                                        stroke-width="1.5" fill="#f1f5f9" />
+                                </svg>
+                            </div>
+
+                            <div class="scan-status">
+                                <i class="fas fa-fingerprint"></i> Scanning face...
+                            </div>
+                            <div class="scan-progress">
+                                <div class="scan-progress-fill"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Floating info badges -->
+                    <div class="info-float if-verified">
+                        <i class="fas fa-check-circle"></i> Face Verified
+                    </div>
+                    <div class="info-float if-match">
+                        <i class="fas fa-fingerprint"></i> Face Match
+                    </div>
+                    <div class="info-float if-time">
+                        <i class="fas fa-video"></i> Live Tracking
+                    </div>
+                    <div class="info-float if-secure">
+                        <i class="fas fa-shield-halved"></i> CSRF Token
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Stats Footer -->
+        <div class="stats-footer">
+            <div class="sf-item">
+                <div class="sf-val">{{ schools_count|default:"0" }}</div>
+                <div class="sf-label">Schools Onboarded</div>
+            </div>
+            <div class="sf-item">
+                <div class="sf-val">{{ faculty_count|default:"0" }}</div>
+                <div class="sf-label">Faculty Tracked</div>
+            </div>
+            <div class="sf-item">
+                <div class="sf-val">99.2%</div>
+                <div class="sf-label">Recognition Rate</div>
+            </div>
+            <div class="sf-item">
+                <div class="sf-val">{{ sessions_count|default:"0" }}</div>
+                <div class="sf-label">Sessions Logged</div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

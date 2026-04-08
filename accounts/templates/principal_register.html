@@ -1,0 +1,113 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register Organization - ClassAudit AI</title>
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/principal_register.css' %}">
+    <link rel="stylesheet" href="{% static 'css/responsive.css' %}">
+</head>
+
+<body>
+    <div class="split-container">
+        <!-- Visual Side -->
+        <div class="visual-side">
+
+            <div class="visual-content">
+                <img src="{% static 'img/login_hero.png' %}" alt="Principal Dashboard" class="hero-img">
+            </div>
+        </div>
+
+        <!-- Form Side -->
+        <div class="form-side">
+            <div class="form-container">
+                <a href="/" class="brand-logo">
+                    <i class="fas fa-cube"></i> ClassAudit AI
+                </a>
+
+                <h1>Register Organization</h1>
+                <p class="subtitle">Create your school's Principal account.</p>
+
+                <div id="statusMessage" class="status-message"></div>
+
+                <form id="registerForm" onsubmit="submitForm(event)">
+                    {% csrf_token %}
+                    <div class="input-group">
+                        <label>School Name</label>
+                        <input type="text" name="school_name" class="input-field" placeholder="e.g. Springfield High"
+                            required autofocus>
+                    </div>
+                    <div class="input-group">
+                        <label>Admin Username</label>
+                        <input type="text" name="username" class="input-field" placeholder="Choose a username" required>
+                    </div>
+                    <div class="input-group">
+                        <label>Password</label>
+                        <input type="password" name="password" class="input-field"
+                            placeholder="Create a strong password" required>
+                    </div>
+
+                    <button type="submit" id="submitBtn" class="btn-primary">
+                        Create Account
+                    </button>
+                </form>
+
+                <div class="footer-text">
+                    Already have an account? <a href="/principal/login/">Login here</a><br>
+                    <a href="/"
+                        style="color: var(--text-light); font-weight: 500; font-size: 0.8rem; margin-top: 10px; display: inline-block;">Back
+                        to Home</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function submitForm(event) {
+            event.preventDefault();
+            const formData = new FormData(document.getElementById('registerForm'));
+            const submitBtn = document.getElementById('submitBtn');
+            const statusMessage = document.getElementById('statusMessage');
+
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating...';
+
+            fetch('{% url "principal_register" %}', {
+                method: 'POST',
+                body: formData
+            })
+                .then(response => response.json())
+                .then(data => {
+                    statusMessage.style.display = 'flex';
+                    if (data.status === 'success') {
+                        statusMessage.style.background = '#dcfce7';
+                        statusMessage.style.color = '#15803d';
+                        statusMessage.innerHTML = '<i class="fas fa-check-circle"></i> ' + data.message;
+                        setTimeout(() => window.location.href = data.redirect, 1500);
+                    } else {
+                        statusMessage.style.background = '#fee2e2';
+                        statusMessage.style.color = '#ef5350';
+                        statusMessage.innerHTML = '<i class="fas fa-exclamation-circle"></i> ' + data.message;
+                        submitBtn.disabled = false;
+                        submitBtn.innerHTML = 'Create Account';
+                    }
+                })
+                .catch(error => {
+                    statusMessage.style.display = 'flex';
+                    statusMessage.style.background = '#fee2e2';
+                    statusMessage.style.color = '#ef5350';
+                    statusMessage.innerHTML = '<i class="fas fa-times-circle"></i> An error occurred. Please try again.';
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = 'Create Account';
+                });
+        }
+    </script>
+</body>
+
+</html>

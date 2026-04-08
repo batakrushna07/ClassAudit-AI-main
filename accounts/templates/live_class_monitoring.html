@@ -1,0 +1,166 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Class Monitoring - {{ session.timetable.subject }}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&display=swap" rel="stylesheet">
+        rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+    <link rel="stylesheet" href="{% static 'css/teacher_theme.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{% static 'css/live_class_monitoring.css' %}">
+    <link rel="stylesheet" href="{% static 'css/responsive.css' %}">
+</head>
+
+<body>
+    <!-- Sidebar -->
+    {% include 'sidebar_teacher.html' %}
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Left Section -->
+        <div class="left-section">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h1 style="font-size: 1.5rem; font-weight: 700; color: var(--text-dark);">{{session.timetable.subject }}</h1>
+                    <p style="color: var(--text-light);">{{ session.start_time|date:"F j, Y" }} • Started at {{session.start_time|time:"g:i A" }}</p>
+                </div>
+                <a href="{% url 'end_class' %}" class="btn-primary"
+                    style="background: #ef4444; text-decoration: none; box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);">
+                    <i class="fas fa-stop-circle"></i> End Class
+                </a>
+            </div>
+
+            <div class="video-container">
+                <div class="live-badge">
+                    <i class="fas fa-circle" style="font-size: 8px;"></i> LIVE
+                </div>
+                <video id="video" autoplay playsinline></video>
+                <canvas id="canvas" style="display: none;"></canvas>
+            </div>
+        </div>
+
+        <!-- Right Section -->
+        <div class="right-section">
+            <div class="card"
+                style="background: white; padding: 2rem; border-radius: 24px; box-shadow: var(--shadow-md); text-align: center;">
+                <h3
+                    style="font-size: 0.9rem; color: var(--text-light); margin-bottom: 0.5rem; text-transform: uppercase; font-weight: 700;">
+                    Session Duration</h3>
+                <div class="status-value" id="sessionTimer">00:00:00</div>
+            </div>
+
+            <div class="card"
+                style="background: white; padding: 2rem; border-radius: 24px; box-shadow: var(--shadow-md); text-align: center;">
+                <h3
+                    style="font-size: 0.9rem; color: var(--text-light); margin-bottom: 0.5rem; text-transform: uppercase; font-weight: 700;">
+                    Active Presence</h3>
+                <div class="status-value" id="activeTimer" style="color: var(--primary-blue);">0m 0s</div>
+                <p style="margin: 5px 0 0; font-size: 0.8rem; color: var(--text-light);">Total authorized time</p>
+            </div>
+
+            <div id="statusIndicator" class="status-indicator status-warning">
+                <i class="fas fa-spinner fa-spin"></i> Initializing...
+            </div>
+
+            <!-- Help Widget -->
+         
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const activeTimer = document.getElementById('activeTimer');
+        const sessionTimer = document.getElementById('sessionTimer');
+
+        // Start Camera
+        navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+            .then(stream => {
+                video.srcObject = stream;
+                startTracking();
+            })
+            .catch(err => {
+                console.error("Camera error:", err);
+                statusIndicator.className = 'status-indicator status-error';
+                statusIndicator.innerHTML = '<i class="fas fa-exclamation-circle"></i> Camera Error';
+            });
+
+        // Simple Session Timer
+        let sessionSeconds = 0;
+        setInterval(() => {
+            sessionSeconds++;
+            const h = Math.floor(sessionSeconds / 3600).toString().padStart(2, '0');
+            const m = Math.floor((sessionSeconds % 3600) / 60).toString().padStart(2, '0');
+            const s = (sessionSeconds % 60).toString().padStart(2, '0');
+            sessionTimer.innerText = `${h}:${m}:${s}`;
+        }, 1000);
+
+        function startTracking() {
+            setInterval(() => {
+                captureAndVerify();
+            }, 5000); // Check every 5 seconds
+        }
+
+        function captureAndVerify() {
+            const context = canvas.getContext('2d');
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            const imageData = canvas.toDataURL('image/jpeg', 0.8);
+
+            const formData = new FormData();
+            formData.append('face_image', imageData);
+
+            // We need to fetch update_live_attendance. The URL might need to be resolved via template tag if not hardcoded.
+            // Using logic from original file: '{% url "update_live_attendance" %}'
+            fetch('{% url "update_live_attendance" %}', {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': getCookie('csrftoken')
+                },
+                body: formData
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        statusIndicator.className = 'status-indicator status-active';
+                        statusIndicator.innerHTML = '<i class="fas fa-check-circle"></i> Authorized';
+                        activeTimer.innerText = data.duration;
+                    } else if (data.status === 'warning') {
+                        statusIndicator.className = 'status-indicator status-warning';
+                        statusIndicator.innerHTML = `<i class="fas fa-exclamation-triangle"></i> ${data.message}`;
+                    } else {
+                        statusIndicator.className = 'status-indicator status-error';
+                        statusIndicator.innerHTML = '<i class="fas fa-times-circle"></i> Verification Failed';
+                    }
+                })
+                .catch(err => {
+                    console.error("Tracking error:", err);
+                });
+        }
+
+        function getCookie(name) {
+            let cookieValue = null;
+            if (document.cookie && document.cookie !== '') {
+                const cookies = document.cookie.split(';');
+                for (let i = 0; i < cookies.length; i++) {
+                    const cookie = cookies[i].trim();
+                    if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                        cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                        break;
+                    }
+                }
+            }
+            return cookieValue;
+        }
+    </script>
+</body>
+
+</html>

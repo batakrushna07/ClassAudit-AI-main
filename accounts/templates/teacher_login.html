@@ -1,0 +1,68 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Faculty Login - ClassAudit AI</title>
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/teacher_login.css' %}">
+    <link rel="stylesheet" href="{% static 'css/responsive.css' %}">
+</head>
+
+<body>
+    <div class="split-container">
+        <!-- Visual Side -->
+        <div class="visual-side">
+            <!-- Floating Elements -->
+
+            <div class="visual-content">
+                <img src="{% static 'img/teacher_login_hero.png' %}" alt="Faculty Login" class="hero-img">
+            </div>
+        </div>
+
+        <!-- Form Side -->
+        <div class="form-side">
+            <a href="/" class="btn-back"><i class="fas fa-arrow-left"></i> Back</a>
+            <div class="form-container">
+                <a href="/" class="brand-logo">
+                    <i class="fas fa-cube"></i> ClassAudit AI
+                </a>
+
+                <h1>Faculty Login</h1>
+                <p class="subtitle">Enter your credentials to access classes.</p>
+
+                {% if error %}
+                <div class="error-alert">
+                    <i class="fas fa-exclamation-circle"></i> {{ error }}
+                </div>
+                {% endif %}
+
+                <form method="POST">
+                    {% csrf_token %}
+                    <div class="input-group">
+                        <input type="text" name="username" class="input-field" placeholder="Username" required
+                            autofocus>
+                    </div>
+                    <div class="input-group">
+                        <input type="password" name="password" class="input-field" placeholder="Password" required>
+                    </div>
+
+                    <button type="submit" class="btn-primary">Sign in</button>
+                </form>
+
+                <div class="footer-text">
+                    <a href="/login/">Use Face Login instead</a><br>
+                    <span style="font-size: 0.8rem; margin-top: 1rem; display: block;">Don't have an account? Ask your
+                        Principal.</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

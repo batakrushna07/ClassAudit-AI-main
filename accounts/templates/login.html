@@ -1,0 +1,129 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Login - ClassAudit AI</title>
+    <link rel="stylesheet" href="{% static 'css/style.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/login.css' %}">
+    <link rel="stylesheet" href="{% static 'css/responsive.css' %}">
+</head>
+
+<body>
+    <div class="split-container">
+        <!-- Visual Side -->
+        <div class="visual-side">
+            
+            <div class="visual-content">
+                <img src="{% static 'img/teacher_login_hero.png' %}" alt="Face Login" class="hero-img">
+            </div>
+        </div>
+
+        <!-- Form Side -->
+        <div class="form-side">
+            <a href="/" class="btn-back"><i class="fas fa-arrow-left"></i> Back</a>
+            <div class="form-container">
+                <a href="/" class="brand-logo"><i class="fas fa-cube"></i> ClassAudit AI</a>
+                <h1>Face Login</h1>
+                <p class="subtitle">Position your face within the frame.</p>
+
+                <form id="loginForm" onsubmit="submitLogin(event)">
+                    {% csrf_token %}
+                    <div class="input-group">
+                        <label
+                            style="display: block; margin-bottom: 0.5rem; font-weight: 700; font-size: 0.85rem; padding-left: 10px;">Username</label>
+                        <input type="text" id="username" class="input-field" placeholder="Enter username" required
+                            autofocus>
+                    </div>
+
+                    <div class="camera-wrapper">
+                        <video id="video" autoplay playsinline></video>
+                        <canvas id="canvas" style="display: none;"></canvas>
+                    </div>
+
+                    <div id="statusMessage" class="status-box"></div>
+
+                    <button type="button" id="captureBtn" class="btn-secondary">
+                        <i class="fas fa-camera"></i> Capture Face
+                    </button>
+                    <button type="submit" id="submitBtn" class="btn-primary" disabled>
+                        Sign in
+                    </button>
+                </form>
+
+                <div class="footer-text">
+                    <a href="/teacher/login-password/">Use Password instead</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const captureBtn = document.getElementById('captureBtn');
+        const submitBtn = document.getElementById('submitBtn');
+        const statusMsg = document.getElementById('statusMessage');
+        let capturedImage = null;
+
+        // Start Camera
+        navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => video.srcObject = stream)
+            .catch(err => showStatus('Camera access denied.', 'error'));
+
+        captureBtn.addEventListener('click', () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            canvas.getContext('2d').drawImage(video, 0, 0);
+            capturedImage = canvas.toDataURL('image/jpeg');
+
+            showStatus('Face captured!', 'success');
+            submitBtn.disabled = false;
+            captureBtn.innerHTML = '<i class="fas fa-redo"></i> Retake';
+        });
+
+        function showStatus(msg, type) {
+            statusMsg.style.display = 'block';
+            statusMsg.className = 'status-box ' + (type === 'success' ? 'status-success' : 'status-error');
+            statusMsg.innerHTML = `<i class="fas fa-${type === 'success' ? 'check' : 'exclamation'}-circle"></i> ` + msg;
+        }
+
+        function submitLogin(e) {
+            e.preventDefault();
+            if (!capturedImage) return showStatus('Please capture face first.', 'error');
+
+            const formData = new FormData();
+            formData.append('username', document.getElementById('username').value);
+            formData.append('face_image', capturedImage);
+            formData.append('csrfmiddlewaretoken', document.querySelector('[name=csrfmiddlewaretoken]').value);
+
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Verifying...';
+
+            fetch('/login/', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        showStatus(data.message, 'success');
+                        setTimeout(() => window.location.href = data.redirect, 1000);
+                    } else {
+                        showStatus(data.message || 'Login failed', 'error');
+                        submitBtn.disabled = false;
+                        submitBtn.innerHTML = 'Sign in';
+                    }
+                })
+                .catch(err => {
+                    console.error(err);
+                    showStatus('Server connection failed', 'error');
+                    submitBtn.disabled = false;
+                });
+        }
+    </script>
+</body>
+
+</html>
